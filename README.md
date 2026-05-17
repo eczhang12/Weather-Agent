@@ -11,6 +11,8 @@ pip install -r requirements.txt
 
 Create a `.env` file:
 
+*** Warning: The Openweather API Key takes a couple of hours to activate
+
 ```bash
 OPENAI_API_KEY=your_openai_api_key_here
 OPENWEATHER_API_KEY=your_openweathermap_api_key_here

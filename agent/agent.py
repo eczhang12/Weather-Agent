@@ -1,33 +1,89 @@
+# `json` is a standard Python library for converting between:
+# - JSON text, which APIs and LLM tool calls often use
+# - Python values, such as dictionaries and strings
 import json
 
+# `OpenAI` is the official client class from the `openai` package.
+# It knows how to send HTTP requests to OpenAI's API and return Python objects.
 from openai import OpenAI
 
+# The system prompt gives the LLM its high-level instructions and boundaries.
 from agent.prompts import SYSTEM_PROMPT
+
+# This is the local Python function that actually calls the weather API.
+# The LLM does not run this function directly. Instead, the LLM asks for a tool
+# call, and our Python code decides whether and how to execute this function.
 from agent.tools import get_current_weather
+
+# Configuration values come from environment variables loaded in `main.py`.
 from config import OPENAI_API_KEY, OPENAI_MODEL
 
 
 class WeatherAgent:
-    """A small OpenAI-powered agent that can call a weather tool."""
+    """A small OpenAI-powered agent that can call a weather tool.
+
+    In this project, an "agent" means a language model plus a little control
+    loop around it. The language model reads the user's message and decides
+    whether it needs outside information. The Python control loop gives the
+    model a tool description, runs the requested tool, and sends the tool result
+    back to the model so it can write a final answer.
+    """
 
     def __init__(self):
+        """Create the reusable OpenAI client and describe available tools.
+
+        `__init__` is a special Python method called automatically when you run
+        `WeatherAgent()`. It prepares the object for later calls to `run()`.
+
+        There are no parameters besides `self`.
+        - `self` means "this particular WeatherAgent object".
+        - Values stored on `self`, such as `self.client`, can be used by other
+          methods on the same object.
+        """
+        # Create an OpenAI API client. The API key tells OpenAI which account is
+        # making the request. Without a valid key, model calls will fail.
         self.client = OpenAI(api_key=OPENAI_API_KEY)
+
+        # Store the model name from configuration so the rest of the class does
+        # not need to know where the setting came from.
         self.model = OPENAI_MODEL
+
+        # `self.tools` is a list of tool definitions that will be sent to the
+        # LLM. This does not execute the function. It only describes the
+        # function so the model can decide whether it should be called.
         self.tools = [
             {
-                "type": "function",
+                # OpenAI's chat API supports different tool types. Here the
+                # tool type is "function", meaning the model can request a
+                # function call with structured arguments.
+                "type": "function", # ALWAYS FUNCTION
                 "function": {
+                    # This name must match the local function handling logic in
+                    # `_handle_tool_call()`. The LLM will use this exact name if
+                    # it decides current weather data is needed.
                     "name": "get_current_weather",
+
+                    # The description teaches the LLM when this tool is useful.
+                    # Clear descriptions make tool-calling agents more reliable.
                     "description": "Get the current live weather for a city or location.",
+
+                    # `parameters` is a JSON Schema. It tells the LLM what
+                    # arguments the function expects. In this case, the tool
+                    # needs one string called `location`.
                     "parameters": {
-                        "type": "object",
-                        "properties": {
+                        "type": "object", #says that it must be a JSON object, not a string or list
+                        "properties": { #Defines allowed fields
                             "location": {
                                 "type": "string",
                                 "description": "The city or location, such as Austin or New York.",
                             }
                         },
+                        # `required` means the model should always provide a
+                        # location when it requests this tool.
                         "required": ["location"],
+
+                        # `additionalProperties: False` tells the model not to
+                        # invent extra argument names beyond `location`.
                         "additionalProperties": False,
                     },
                 },
@@ -35,12 +91,39 @@ class WeatherAgent:
         ]
 
     def run(self, user_input: str) -> str:
-        """Send the user's message to the model and return the final answer."""
+        """Send the user's message to the model and return the final answer.
+
+        Parameter:
+        - user_input: the text typed by the user, such as
+          "What is the weather in Austin?"
+
+        Return value:
+        - A plain string that can be printed in the terminal.
+
+        How this fits the architecture:
+        This method is the main agent loop for one user request. It sends the
+        request to the LLM, checks whether the LLM asked to use a tool, runs any
+        requested tool locally, then asks the LLM to write the final answer.
+        """
+        # `messages` is the conversation history sent to the chat model.
+        # Each message has a `role`:
+        # - "system" gives instructions to the assistant.
+        # - "user" contains the human's request.
+        #
+        # This is the first request in the request/response flow.
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_input},
         ]
 
+        # Ask the model what to do with the user's message.
+        #
+        # Important parameters:
+        # - model: which OpenAI model to use.
+        # - messages: the conversation so far.
+        # - tools: the available function descriptions.
+        # - tool_choice="auto": lets the model decide whether to call a tool or
+        #   answer directly.
         first_response = self.client.chat.completions.create(
             model=self.model,
             messages=messages,
@@ -48,16 +131,70 @@ class WeatherAgent:
             tool_choice="auto",
         )
 
+        # The API returns a response object with one or more choices.
+        # This app uses the first choice out of the many generated choices. `assistant_message` may contain either:
+        # - normal assistant text, or
+        # - one or more tool calls requested by the model.
         assistant_message = first_response.choices[0].message
 
         # If the model does not need a tool, return its answer directly.
-        if not assistant_message.tool_calls:
+        # For example, if the user asks "What can you do?", the model can answer
+        # without live weather data.
+        if not assistant_message.tool_calls: # checking if LLM Determined if tool should be used or not
             return assistant_message.content or "I am not sure how to answer that."
 
+        # If the model did request a tool, save the assistant's tool-call
+        # message in the conversation history. The next OpenAI request needs to
+        # see that the assistant asked for the tool before it sees the tool
+        # result.
+        # Why?
+        # The model is stateless between API calls—it does NOT remember that in the
+        # previous request it decided to call a tool. The only "memory" it has is the
+        # conversation history we explicitly send in `messages`.
+        #
+        # By appending this assistant message, we preserve the causal chain:
+        #
+        #   User: "What's the weather in Austin?"
+        #   Assistant: "I want to call get_weather(city='Austin')"
+        #   Tool: "72°F and sunny"
+        #
+        # When we make the next API call, the model can clearly see:
+        # 1. what the user asked
+        # 2. that it chose to call a specific tool
+        # 3. which tool output belongs to that request
+        #
+        # Without this assistant tool-call message, the next request would look like:
+        #
+        #   User: "What's the weather in Austin?"
+        #   Tool: "72°F and sunny"
+        #
+        # This breaks the reasoning chain because the model sees tool output with no
+        # explanation of why it exists or what request it belongs to. That ambiguity
+        # can lead to:
+        # - worse responses
+        # - incorrect reasoning
+        # - mismatching tool outputs to requests
+        # - failures when multiple tools are involved
+        # - invalid tool-calling conversation structure
         messages.append(assistant_message)
 
+        # A model can technically request multiple tools at once. This project
+        # only defines one tool, but looping keeps the code compatible with the
+        # API shape.
         for tool_call in assistant_message.tool_calls:
+            # Run the local Python function requested by the LLM and get back a
+            # Python dictionary, such as:
+            # {"temperature_f": 72, "condition": "clear sky", ...}
             tool_result = self._handle_tool_call(tool_call)
+
+            # Send the tool result back as a special "tool" role message.
+            #
+            # `tool_call_id` links this result to the exact tool call the model
+            # requested. This is important when there are multiple tool calls.
+            #
+            # `json.dumps(tool_result)` converts the Python dictionary into a
+            # JSON string because chat messages contain text, not raw Python
+            # dictionaries.
             messages.append(
                 {
                     "role": "tool",
@@ -66,24 +203,69 @@ class WeatherAgent:
                 }
             )
 
+        # Now ask the model a second time. This time the conversation includes:
+        # 1. The system prompt.
+        # 2. The user's weather question.
+        # 3. The assistant's request to call `get_current_weather`.
+        # 4. The tool result containing live weather data.
+        # AKA The entire Causal Chain is there so no inferring/poor reasoning will occur
+        # 
+        # The model uses that data to produce a natural-language response.
         final_response = self.client.chat.completions.create(
             model=self.model,
             messages=messages,
         )
 
+        # Return the assistant's final text. The fallback string protects the
+        # CLI from printing `None` if the API response has no content.
         return final_response.choices[0].message.content or "I could not create a weather summary."
 
     def _handle_tool_call(self, tool_call) -> dict:
-        """Run the local Python function requested by the model."""
+        """Run the local Python function requested by the model.
+
+        Parameter:
+        - tool_call: an object from OpenAI's response that contains:
+          - the function name the model wants to call
+          - the function arguments as a JSON string
+          - an ID used to connect the tool result back to the request
+
+        Return value:
+        - A Python dictionary with either weather data or an error message.
+
+        Why this method exists:
+        The LLM is not allowed to directly execute arbitrary Python code. This
+        method is the safety gate between "the model requested a tool" and "the
+        app actually runs a local function".
+        """
+        # Read the function name requested by the model.
         function_name = tool_call.function.name
 
+        # Only allow the one tool this app explicitly supports. This prevents
+        # the model from accidentally or maliciously requesting unknown code.
         if function_name != "get_current_weather":
             return {"error": f"Unknown tool requested: {function_name}"}
 
         try:
+            # The model provides function arguments as JSON text, for example:
+            # '{"location": "Austin"}'
+            #
+            # `json.loads()` parses that JSON string into a Python dictionary:
+            # {"location": "Austin"}
+            #
+            # `or "{}"` means that if arguments is empty or None, parse an empty
+            # JSON object instead of crashing immediately.
             arguments = json.loads(tool_call.function.arguments or "{}")
         except json.JSONDecodeError:
+            # If the model returns invalid JSON, the weather function cannot be
+            # called safely because we do not know what arguments it intended.
             return {"error": "The model provided invalid tool arguments."}
 
+        # Pull the `location` value out of the parsed arguments dictionary.
+        # `.get("location")` returns None instead of raising an error if the
+        # key is missing.
         location = arguments.get("location")
+
+        # This is where the agent's tool call becomes a real API lookup.
+        # `get_current_weather()` lives in `agent/tools.py` and calls
+        # OpenWeatherMap over the internet.
         return get_current_weather(location)
