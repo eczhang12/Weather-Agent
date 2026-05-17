@@ -19,6 +19,21 @@ OPENWEATHER_API_KEY=your_openweathermap_api_key_here
 OPENAI_MODEL=gpt-4.1-mini
 ```
 
+## Docker (Preferred)
+
+Build the image:
+
+```bash
+docker build -t weather-agent .
+```
+
+Run the container:
+
+```bash
+docker run --env-file .env -it weather-agent
+```
+
+
 Run locally:
 
 ```bash
@@ -32,16 +47,79 @@ What is the weather in Austin?
 Give me the weather for New York
 ```
 
-## Docker
 
-Build the image:
 
-```bash
-docker build -t weather-agent .
+
+
+## How the Weather Agent Works
+
+At a high level, this project is a small command-line AI agent. The user types a
+weather question, Python sends that question to an OpenAI model, and the model
+decides whether it needs live weather data. If it does, the model asks the app to
+call a tool. The Python code then calls OpenWeatherMap, gives the result back to
+the model, and the model writes a friendly final answer.
+
+```mermaid
+flowchart TD
+    A[User enters a weather question] --> B[main.py receives the input]
+    B --> C[WeatherAgent builds conversation messages]
+    C --> D[Messages are sent to the OpenAI model]
+    D --> E{Can the model answer directly?}
+    E -->|Yes| F[Model returns a normal assistant message]
+    F --> G[Final answer is shown to the user]
+    E -->|No, weather data is needed| H[Model returns a tool call]
+    H --> I[App appends the assistant tool-call message]
+    I --> J[Python executes get_current_weather]
+    J --> K[Tool calls the OpenWeatherMap API]
+    K --> L[Weather API returns weather data]
+    L --> M[Tool result is appended to conversation history]
+    M --> N[Updated messages are sent back to the model]
+    N --> O[Model creates a friendly weather summary]
+    O --> G
 ```
 
-Run the container:
+Here is the same flow written out:
 
-```bash
-docker run --env-file .env -it weather-agent
+1. You type something like `What is the weather in Austin?`.
+2. `main.py` reads your text from the terminal.
+3. `main.py` passes your text to `WeatherAgent.run()`.
+4. The agent creates a message list containing the system prompt and your user
+   message.
+5. The agent sends those messages to the OpenAI model, along with a description
+   of the `get_current_weather` tool.
+6. The model decides whether it can answer directly or whether it needs live
+   weather data.
+7. For current weather questions, the model returns a tool call instead of
+   guessing.
+8. The app records that tool-call message in the conversation history.
+9. Python runs `get_current_weather(location)`.
+10. The weather tool calls the OpenWeatherMap API.
+11. OpenWeatherMap returns JSON weather data to the Python app.
+12. The app appends that tool result to the conversation history.
+13. The updated messages are sent back to the OpenAI model.
+14. The model reads the weather data and writes a friendly summary.
+15. `main.py` prints the final answer in the terminal.
+
+### Why Append the Assistant Tool-Call Message?
+
+The OpenAI model is stateless between API calls. That means it does not
+automatically remember the previous request unless the app sends the previous
+messages again.
+
+The message history is the model's only memory.
+
+When the model asks for a tool, the app must append the assistant tool-call
+message before appending the tool result. This preserves the causal chain:
+
+```text
+User asked a question
+-> Assistant requested get_current_weather
+-> Tool returned weather data
+-> Assistant summarized the result
 ```
+
+Without the assistant tool-call message, the model would see a tool result
+without knowing why that tool was called. Keeping both messages in order helps
+the model understand that the weather data is the answer to its own tool request.
+
+
