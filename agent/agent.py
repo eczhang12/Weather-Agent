@@ -2,6 +2,7 @@
 # - JSON text, which APIs and LLM tool calls often use
 # - Python values, such as dictionaries and strings
 import json
+from typing import Any
 
 # `OpenAI` is the official client class from the `openai` package.
 # It knows how to send HTTP requests to OpenAI's API and return Python objects.
@@ -16,7 +17,7 @@ from agent.prompts import SYSTEM_PROMPT
 from agent.tools import get_current_weather
 
 # Configuration values come from environment variables loaded in `main.py`.
-from config import OPENAI_API_KEY, OPENAI_MODEL
+from config import OPENAI_API_KEY, OPENAI_MODEL, debug_print
 
 
 class WeatherAgent:
@@ -90,6 +91,15 @@ class WeatherAgent:
             }
         ]
 
+        debug_print("WeatherAgent initialized", {
+            "model": self.model,
+            "available_tools": [
+                tool["function"]["name"]
+                for tool in self.tools
+                if tool.get("type") == "function"
+            ],
+        })
+
     def run(self, user_input: str) -> str:
         """Send the user's message to the model and return the final answer.
 
@@ -115,6 +125,7 @@ class WeatherAgent:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_input},
         ]
+        debug_print("WeatherAgent built initial messages", messages)
 
         # Ask the model what to do with the user's message.
         #
@@ -130,17 +141,20 @@ class WeatherAgent:
             tools=self.tools,
             tool_choice="auto",
         )
+        debug_print("OpenAI first response received")
 
         # The API returns a response object with one or more choices.
         # This app uses the first choice out of the many generated choices. `assistant_message` may contain either:
         # - normal assistant text, or
         # - one or more tool calls requested by the model.
         assistant_message = first_response.choices[0].message
+        debug_print("Assistant message from first response", self._message_to_debug_dict(assistant_message))
 
         # If the model does not need a tool, return its answer directly.
         # For example, if the user asks "What can you do?", the model can answer
         # without live weather data.
         if not assistant_message.tool_calls: # checking if LLM Determined if tool should be used or not
+            debug_print("No tool call requested; returning assistant response directly")
             return assistant_message.content or "I am not sure how to answer that."
 
         # If the model did request a tool, save the assistant's tool-call
@@ -177,6 +191,7 @@ class WeatherAgent:
         # - failures when multiple tools are involved
         # - invalid tool-calling conversation structure
         messages.append(assistant_message)
+        debug_print("Appended assistant tool-call message to preserve causal chain", self._messages_to_debug_list(messages))
 
         # A model can technically request multiple tools at once. This project
         # only defines one tool, but looping keeps the code compatible with the
@@ -185,7 +200,9 @@ class WeatherAgent:
             # Run the local Python function requested by the LLM and get back a
             # Python dictionary, such as:
             # {"temperature_f": 72, "condition": "clear sky", ...}
+            debug_print("Handling requested tool call", self._tool_call_to_debug_dict(tool_call))
             tool_result = self._handle_tool_call(tool_call)
+            debug_print("Tool call returned result", tool_result)
 
             # Send the tool result back as a special "tool" role message.
             #
@@ -202,6 +219,7 @@ class WeatherAgent:
                     "content": json.dumps(tool_result),
                 }
             )
+            debug_print("Appended tool result to conversation history", self._messages_to_debug_list(messages))
 
         # Now ask the model a second time. This time the conversation includes:
         # 1. The system prompt.
@@ -211,14 +229,17 @@ class WeatherAgent:
         # AKA The entire Causal Chain is there so no inferring/poor reasoning will occur
         # 
         # The model uses that data to produce a natural-language response.
+        debug_print("Sending updated messages back to OpenAI for final answer", self._messages_to_debug_list(messages))
         final_response = self.client.chat.completions.create(
             model=self.model,
             messages=messages,
         )
+        final_message = final_response.choices[0].message
+        debug_print("OpenAI final response received", self._message_to_debug_dict(final_message))
 
         # Return the assistant's final text. The fallback string protects the
         # CLI from printing `None` if the API response has no content.
-        return final_response.choices[0].message.content or "I could not create a weather summary."
+        return final_message.content or "I could not create a weather summary."
 
     def _handle_tool_call(self, tool_call) -> dict:
         """Run the local Python function requested by the model.
@@ -239,6 +260,7 @@ class WeatherAgent:
         """
         # Read the function name requested by the model.
         function_name = tool_call.function.name
+        debug_print("Tool handler received function name", function_name)
 
         # Only allow the one tool this app explicitly supports. This prevents
         # the model from accidentally or maliciously requesting unknown code.
@@ -255,6 +277,7 @@ class WeatherAgent:
             # `or "{}"` means that if arguments is empty or None, parse an empty
             # JSON object instead of crashing immediately.
             arguments = json.loads(tool_call.function.arguments or "{}")
+            debug_print("Parsed tool arguments from JSON", arguments)
         except json.JSONDecodeError:
             # If the model returns invalid JSON, the weather function cannot be
             # called safely because we do not know what arguments it intended.
@@ -269,3 +292,38 @@ class WeatherAgent:
         # `get_current_weather()` lives in `agent/tools.py` and calls
         # OpenWeatherMap over the internet.
         return get_current_weather(location)
+
+    def _messages_to_debug_list(self, messages: list[Any]) -> list[dict]:
+        """Convert mixed message objects/dicts into printable debug dictionaries.
+
+        The OpenAI client returns message objects, while this app also builds
+        plain dictionaries. Debug output is easier to read when both shapes are
+        normalized into dictionaries before printing.
+        """
+        return [self._message_to_debug_dict(message) for message in messages]
+
+    def _message_to_debug_dict(self, message: Any) -> dict:
+        """Return a JSON-friendly summary of one chat message for debug logs."""
+        if isinstance(message, dict):
+            return message
+
+        return {
+            "role": getattr(message, "role", None),
+            "content": getattr(message, "content", None),
+            "tool_calls": [
+                self._tool_call_to_debug_dict(tool_call)
+                for tool_call in (getattr(message, "tool_calls", None) or [])
+            ],
+        }
+
+    def _tool_call_to_debug_dict(self, tool_call: Any) -> dict:
+        """Return a JSON-friendly summary of a model-requested tool call."""
+        function = getattr(tool_call, "function", None)
+        return {
+            "id": getattr(tool_call, "id", None),
+            "type": getattr(tool_call, "type", None),
+            "function": {
+                "name": getattr(function, "name", None),
+                "arguments": getattr(function, "arguments", None),
+            },
+        }

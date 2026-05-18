@@ -5,7 +5,7 @@ import requests
 
 # The OpenWeatherMap API key comes from `config.py`, which reads `.env` through
 # environment variables loaded by `main.py`.
-from config import OPENWEATHER_API_KEY
+from config import OPENWEATHER_API_KEY, debug_print
 
 
 # This is the endpoint URL for OpenWeatherMap's "current weather" API.
@@ -34,12 +34,14 @@ def get_current_weather(location: str) -> dict:
     # `not location` catches None or an empty string.
     # `location.strip()` removes spaces; if only spaces remain, it is invalid.
     if not location or not location.strip():
+        debug_print("Weather tool received an empty location")
         return {"error": "Please provide a location."}
 
     # Check that a real API key is available before making the HTTP request.
     # This produces a clear beginner-friendly error instead of a confusing API
     # authentication failure later.
     if not OPENWEATHER_API_KEY or OPENWEATHER_API_KEY == "your_openweathermap_api_key_here":
+        debug_print("Weather tool cannot run because OPENWEATHER_API_KEY is missing")
         return {
             "error": "OPENWEATHER_API_KEY is missing. Add your OpenWeatherMap API key to .env."
         }
@@ -56,6 +58,14 @@ def get_current_weather(location: str) -> dict:
         "appid": OPENWEATHER_API_KEY,
         "units": "imperial",
     }
+    debug_print("Weather tool prepared OpenWeatherMap request", {
+        "url": OPENWEATHER_URL,
+        "params": {
+            "q": params["q"],
+            "appid": "[hidden]",
+            "units": params["units"],
+        },
+    })
 
     try:
         # Send an HTTP GET request to OpenWeatherMap.
@@ -65,10 +75,15 @@ def get_current_weather(location: str) -> dict:
         # `timeout=10` means "give up after 10 seconds" so the app does not hang
         # forever if the network or API is unavailable.
         response = requests.get(OPENWEATHER_URL, params=params, timeout=10)
+        debug_print("OpenWeatherMap HTTP response received", {
+            "status_code": response.status_code,
+            "url_without_api_key": response.url.replace(OPENWEATHER_API_KEY, "[hidden]"),
+        })
 
         # OpenWeatherMap returns JSON text. `response.json()` parses that text
         # into Python data structures, usually dictionaries and lists.
         data = response.json()
+        debug_print("Parsed OpenWeatherMap JSON response", data)
     except requests.RequestException as exc:
         # Network errors, timeouts, DNS problems, and similar request failures
         # are grouped under `requests.RequestException`.
@@ -85,6 +100,10 @@ def get_current_weather(location: str) -> dict:
         # `.get("message", "...")` reads the API's error message if it exists;
         # otherwise it uses the fallback string.
         message = data.get("message", "Unknown weather API error.")
+        debug_print("OpenWeatherMap returned an error response", {
+            "status_code": response.status_code,
+            "message": message,
+        })
         return {"error": f"OpenWeatherMap error: {message}"}
 
     try:
@@ -97,7 +116,7 @@ def get_current_weather(location: str) -> dict:
         #   the `weather` list, then get its `description`.
         #
         # Returning a smaller dictionary keeps the final LLM prompt focused.
-        return {
+        weather_result = {
             "location": f"{data['name']}, {data['sys']['country']}",
             "temperature_f": data["main"]["temp"],
             "feels_like_f": data["main"]["feels_like"],
@@ -105,6 +124,8 @@ def get_current_weather(location: str) -> dict:
             "humidity": data["main"]["humidity"],
             "wind_speed_mph": data["wind"]["speed"],
         }
+        debug_print("Weather tool normalized API data for the LLM", weather_result)
+        return weather_result
     except (KeyError, IndexError, TypeError):
         # These errors mean the API responded with JSON, but not in the shape
         # the app expected:

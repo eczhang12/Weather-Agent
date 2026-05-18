@@ -17,6 +17,7 @@ Create a `.env` file:
 OPENAI_API_KEY=your_openai_api_key_here
 OPENWEATHER_API_KEY=your_openweathermap_api_key_here
 OPENAI_MODEL=gpt-4.1-mini
+WEATHER_AGENT_DEBUG=false
 ```
 
 ## Docker (Preferred)
@@ -32,6 +33,42 @@ Run the container:
 ```bash
 docker run --env-file .env -it weather-agent
 ```
+
+## Verbose Debug Mode
+
+The best way to turn on debug mode in Docker is with an environment variable in
+your `.env` file:
+
+```bash
+WEATHER_AGENT_DEBUG=true
+```
+
+Then run Docker the same way as usual:
+
+```bash
+docker run --env-file .env -it weather-agent
+```
+
+This works well because Docker automatically loads every variable from `.env`
+when you use `--env-file .env`. You do not need to change the Python command or
+rebuild the image just to switch debug mode on or off.
+
+When debug mode is enabled, the app prints the major steps in the agent flow:
+
+1. `main.py` receives your input.
+2. `WeatherAgent` builds the message history.
+3. The first request is sent to OpenAI.
+4. The model either answers directly or returns a tool call.
+5. The app appends the assistant tool-call message.
+6. Python parses the tool arguments.
+7. `get_current_weather` prepares the OpenWeatherMap request.
+8. OpenWeatherMap returns an HTTP response and JSON data.
+9. The app appends the tool result to the message history.
+10. The updated messages are sent back to OpenAI.
+11. The model returns the final friendly answer.
+
+API keys are not printed in debug output. The weather API URL is shown with the
+API key replaced by `[hidden]`.
 
 
 Run locally:
@@ -121,5 +158,3 @@ User asked a question
 Without the assistant tool-call message, the model would see a tool result
 without knowing why that tool was called. Keeping both messages in order helps
 the model understand that the weather data is the answer to its own tool request.
-
-

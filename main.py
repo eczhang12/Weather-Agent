@@ -65,10 +65,21 @@ def main() -> None:
     # `WeatherAgent` imports `config.py`, and `config.py` reads the API keys.
     # This keeps the request/response flow configured before the agent starts.
     from agent.agent import WeatherAgent
-    from config import OPENAI_API_KEY, OPENWEATHER_API_KEY #technically not needed, only used for checking missing keys
+    from config import (
+        OPENAI_API_KEY,
+        OPENWEATHER_API_KEY,
+        WEATHER_AGENT_DEBUG,
+        debug_print,
+    )
 
     # Show setup and usage instructions before entering the interactive loop.
     print_startup_help()
+
+    debug_print("Loaded configuration", {
+        "openai_api_key_present": bool(OPENAI_API_KEY),
+        "openweather_api_key_present": bool(OPENWEATHER_API_KEY),
+        "weather_agent_debug": WEATHER_AGENT_DEBUG,
+    })
 
     # Stop early if the OpenAI key is missing. The OpenAI key is required
     # because the language model decides whether to call the weather tool and
@@ -95,6 +106,7 @@ def main() -> None:
         # `input("You: ")` prints the prompt and waits for keyboard input.
         # `.strip()` removes extra spaces and the final newline.
         user_input = input("You: ").strip()
+        debug_print("main.py received raw user input", user_input)
 
         # `.lower()` makes the comparison case-insensitive, so "QUIT",
         # "Quit", and "quit" all stop the app.
@@ -112,6 +124,7 @@ def main() -> None:
             # This is the important handoff from the command-line interface to
             # the agent architecture. `agent.run()` sends the user's text to
             # the LLM, handles any tool call, and returns a final string.
+            debug_print("main.py is handing the input to WeatherAgent.run()")
             response = agent.run(user_input)
         except Exception as exc:
             # `except Exception as exc` catches unexpected runtime errors so
