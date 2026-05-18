@@ -236,13 +236,19 @@ def get_current_weather(location: str) -> dict:
         return {"error": "OpenWeatherMap returned an unexpected data format."}
 
 
-def get_weather_forecast(location: str, days: int = 7) -> dict:
+def get_weather_forecast(
+    location: str,
+    days: int = 7,
+    target_day_offset: int | None = None,
+) -> dict:
     """Fetch a daily weather forecast from OpenWeatherMap One Call for up to 8 days.
 
     Parameters:
     - location: a city or place name, such as "Austin" or "New York".
-    - days: how many forecast days to request. One Call supports values from
-      1 through 8 for daily forecasts.
+    - days: how many forecast days to return, starting with today. One Call
+      supports values from 1 through 8 for daily forecasts.
+    - target_day_offset: optional index of a specific day to answer about,
+      where 0 means today, 1 means tomorrow, and 2 means two days from now.
 
     Return value:
     - A Python dictionary containing the location, number of days requested, and
@@ -262,6 +268,17 @@ def get_weather_forecast(location: str, days: int = 7) -> dict:
     if days < 1 or days > 8:
         return {"error": "Forecast days must be between 1 and 8."}
 
+    if target_day_offset is not None:
+        try:
+            target_day_offset = int(target_day_offset)
+        except (TypeError, ValueError):
+            return {"error": "Target day offset must be a number from 0 to 7."}
+
+        if target_day_offset < 0 or target_day_offset > 7:
+            return {"error": "Target day offset must be between 0 and 7."}
+
+        days = max(days, target_day_offset + 1)
+
     onecall_result = _get_onecall_weather(
         location,
         exclude="current,minutely,hourly,alerts",
@@ -275,17 +292,24 @@ def get_weather_forecast(location: str, days: int = 7) -> dict:
         forecasts = []
         timezone_offset = data.get("timezone_offset", 0)
 
-        for daily_forecast in data["daily"][:days]:
+        daily_forecasts = data["daily"]
+
+        for day_offset, daily_forecast in enumerate(daily_forecasts[:days]):
+            weather = daily_forecast.get("weather") or [{}]
             forecasts.append(
                 {
+                    "day_offset": day_offset,
                     "date": _format_date(daily_forecast["dt"], timezone_offset),
                     "temperature_day_f": daily_forecast["temp"]["day"],
                     "temperature_min_f": daily_forecast["temp"]["min"],
                     "temperature_max_f": daily_forecast["temp"]["max"],
                     "feels_like_day_f": daily_forecast["feels_like"]["day"],
-                    "condition": daily_forecast["weather"][0]["description"],
+                    "condition": weather[0].get("description"),
+                    "summary": daily_forecast.get("summary"),
                     "humidity": daily_forecast["humidity"],
-                    "wind_speed_mph": daily_forecast["speed"],
+                    "wind_speed_mph": daily_forecast["wind_speed"],
+                    "chance_of_rain": daily_forecast.get("pop"),
+                    "rain_inches": daily_forecast.get("rain", 0),
                 }
             )
 
@@ -295,6 +319,16 @@ def get_weather_forecast(location: str, days: int = 7) -> dict:
             "days_returned": len(forecasts),
             "forecast": forecasts,
         }
+
+        if target_day_offset is not None:
+            try:
+                forecast_result["target_day_offset"] = target_day_offset
+                forecast_result["target_forecast"] = forecasts[target_day_offset]
+            except IndexError:
+                return {
+                    "error": "OpenWeatherMap did not return enough forecast days for that request."
+                }
+
         debug_print("Forecast tool normalized API data for the LLM", forecast_result)
         return forecast_result
     except (KeyError, IndexError, TypeError):

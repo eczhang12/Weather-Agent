@@ -120,9 +120,15 @@ class WeatherAgent:
                             },
                             "days": {
                                 "type": "integer",
-                                "description": "The number of forecast days to return, from 1 to 8.",
+                                "description": "The number of forecast days to return, starting with today, from 1 to 8.",
                                 "minimum": 1,
                                 "maximum": 8,
+                            },
+                            "target_day_offset": {
+                                "type": "integer",
+                                "description": "Use when the user asks about one specific future day. 0 means today, 1 means tomorrow, 2 means two days from now, up to 7.",
+                                "minimum": 0,
+                                "maximum": 7,
                             },
                         },
                         "required": ["location", "days"],
@@ -346,7 +352,8 @@ class WeatherAgent:
             return get_current_weather(location)
 
         days = arguments.get("days", 7)
-        return get_weather_forecast(location, days)
+        target_day_offset = arguments.get("target_day_offset")
+        return get_weather_forecast(location, days, target_day_offset)
 
     def _messages_to_debug_list(self, messages: list[Any]) -> list[dict]:
         """Convert mixed message objects/dicts into printable debug dictionaries.
