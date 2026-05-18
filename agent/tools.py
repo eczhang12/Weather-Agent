@@ -1,6 +1,8 @@
 # `requests` is a third-party HTTP library.
 # HTTP is the request/response protocol used by web APIs. This app uses it to
-# ask OpenWeatherMap for current weather data.
+# ask OpenWeatherMap for geocoding, current weather, and forecast data.
+from datetime import datetime, timezone
+
 import requests
 
 # The OpenWeatherMap API key comes from `config.py`, which reads `.env` through
@@ -8,13 +10,178 @@ import requests
 from config import OPENWEATHER_API_KEY, debug_print
 
 
-# This is the endpoint URL for OpenWeatherMap's "current weather" API.
-# An endpoint is the specific web address where an API accepts requests.
-OPENWEATHER_URL = "https://api.openweathermap.org/data/2.5/weather"
+# This endpoint converts a city or place name into latitude/longitude.
+# One Call does not accept "Austin" directly, so we geocode first.
+OPENWEATHER_GEOCODING_URL = "https://api.openweathermap.org/geo/1.0/direct"
+
+# This is the endpoint URL for OpenWeatherMap One Call API 3.0.
+# One Call can return current weather and daily forecasts in one API family.
+OPENWEATHER_ONECALL_URL = "https://api.openweathermap.org/data/3.0/onecall"
+
+
+def _missing_openweather_key() -> bool:
+    """Return True when the OpenWeather API key is missing or still placeholder text."""
+    return (
+        not OPENWEATHER_API_KEY
+        or OPENWEATHER_API_KEY == "your_openweathermap_api_key_here"
+    )
+
+
+def _hidden_url(url: str) -> str:
+    """Return a debug-safe URL with the API key hidden."""
+    return url.replace(OPENWEATHER_API_KEY, "[hidden]")
+
+
+def _format_location(geo_result: dict) -> str:
+    """Create a readable location name from OpenWeather geocoding data."""
+    parts = [geo_result.get("name")]
+
+    if geo_result.get("state"):
+        parts.append(geo_result["state"])
+
+    if geo_result.get("country"):
+        parts.append(geo_result["country"])
+
+    return ", ".join(part for part in parts if part)
+
+
+def _format_date(timestamp: int, timezone_offset: int) -> str:
+    """Convert a Unix timestamp into a local date string for the weather location."""
+    return datetime.fromtimestamp(
+        timestamp + timezone_offset,
+        tz=timezone.utc,
+    ).strftime("%Y-%m-%d")
+
+
+def _geocode_location(location: str) -> dict:
+    """Convert a user-provided place name into latitude and longitude.
+
+    Parameter:
+    - location: a city or place name, such as "Austin" or "New York".
+
+    Return value:
+    - On success, a dictionary with `name`, `lat`, and `lon`.
+    - On failure, a dictionary with an `"error"` key.
+
+    Why this is needed:
+    OpenWeather One Call requires coordinates. Users naturally type city names,
+    so this helper bridges the beginner-friendly user input and the coordinate-
+    based API.
+    """
+    if not location or not location.strip():
+        return {"error": "Please provide a location."}
+
+    if _missing_openweather_key():
+        return {
+            "error": "OPENWEATHER_API_KEY is missing. Add your OpenWeatherMap API key to .env."
+        }
+
+    params = {
+        "q": location.strip(),
+        "limit": 1,
+        "appid": OPENWEATHER_API_KEY,
+    }
+    debug_print("Prepared OpenWeatherMap geocoding request", {
+        "url": OPENWEATHER_GEOCODING_URL,
+        "params": {
+            "q": params["q"],
+            "limit": params["limit"],
+            "appid": "[hidden]",
+        },
+    })
+
+    try:
+        response = requests.get(OPENWEATHER_GEOCODING_URL, params=params, timeout=10)
+        debug_print("OpenWeatherMap geocoding HTTP response received", {
+            "status_code": response.status_code,
+            "url_without_api_key": _hidden_url(response.url),
+        })
+
+        data = response.json()
+        debug_print("Parsed OpenWeatherMap geocoding JSON response", data)
+    except requests.RequestException as exc:
+        return {"error": f"Could not reach OpenWeatherMap geocoding: {exc}"}
+    except ValueError:
+        return {"error": "OpenWeatherMap geocoding returned a response that was not valid JSON."}
+
+    if response.status_code != 200:
+        message = data.get("message", "Unknown geocoding API error.")
+        return {"error": f"OpenWeatherMap geocoding error: {message}"}
+
+    if not data:
+        return {"error": f"OpenWeatherMap could not find a location named '{location}'."}
+
+    try:
+        first_match = data[0]
+        return {
+            "name": _format_location(first_match),
+            "lat": first_match["lat"],
+            "lon": first_match["lon"],
+        }
+    except (KeyError, IndexError, TypeError):
+        return {"error": "OpenWeatherMap returned an unexpected geocoding data format."}
+
+
+def _get_onecall_weather(location: str, exclude: str) -> dict:
+    """Fetch One Call weather data for a location name.
+
+    Parameters:
+    - location: the city/place name from the user.
+    - exclude: a comma-separated One Call `exclude` value telling OpenWeather
+      which blocks to leave out of the response.
+
+    Return value:
+    - On success, a dictionary with the geocoded location and One Call data.
+    - On failure, a dictionary with an `"error"` key.
+    """
+    geocoded = _geocode_location(location)
+    if "error" in geocoded:
+        return geocoded
+
+    params = {
+        "lat": geocoded["lat"],
+        "lon": geocoded["lon"],
+        "appid": OPENWEATHER_API_KEY,
+        "units": "imperial",
+        "exclude": exclude,
+    }
+    debug_print("Prepared OpenWeatherMap One Call request", {
+        "url": OPENWEATHER_ONECALL_URL,
+        "params": {
+            "lat": params["lat"],
+            "lon": params["lon"],
+            "appid": "[hidden]",
+            "units": params["units"],
+            "exclude": params["exclude"],
+        },
+    })
+
+    try:
+        response = requests.get(OPENWEATHER_ONECALL_URL, params=params, timeout=10)
+        debug_print("OpenWeatherMap One Call HTTP response received", {
+            "status_code": response.status_code,
+            "url_without_api_key": _hidden_url(response.url),
+        })
+
+        data = response.json()
+        debug_print("Parsed OpenWeatherMap One Call JSON response", data)
+    except requests.RequestException as exc:
+        return {"error": f"Could not reach OpenWeatherMap One Call: {exc}"}
+    except ValueError:
+        return {"error": "OpenWeatherMap One Call returned a response that was not valid JSON."}
+
+    if response.status_code != 200:
+        message = data.get("message", "Unknown One Call API error.")
+        return {"error": f"OpenWeatherMap One Call error: {message}"}
+
+    return {
+        "location": geocoded["name"],
+        "data": data,
+    }
 
 
 def get_current_weather(location: str) -> dict:
-    """Fetch current weather from OpenWeatherMap for a city or place name.
+    """Fetch current weather from OpenWeatherMap One Call for a city or place name.
 
     Parameter:
     - location: a city or place name from the user, such as "Austin" or
@@ -30,99 +197,33 @@ def get_current_weather(location: str) -> dict:
     This is the tool/function the agent can call. The LLM decides *when* to use
     it, but this Python function does the actual live weather API request.
     """
-    # Validate the input before calling the external API.
-    # `not location` catches None or an empty string.
-    # `location.strip()` removes spaces; if only spaces remain, it is invalid.
-    if not location or not location.strip():
-        debug_print("Weather tool received an empty location")
-        return {"error": "Please provide a location."}
+    onecall_result = _get_onecall_weather(
+        location,
+        exclude="minutely,hourly,daily,alerts",
+    )
+    if "error" in onecall_result:
+        return onecall_result
 
-    # Check that a real API key is available before making the HTTP request.
-    # This produces a clear beginner-friendly error instead of a confusing API
-    # authentication failure later.
-    if not OPENWEATHER_API_KEY or OPENWEATHER_API_KEY == "your_openweathermap_api_key_here":
-        debug_print("Weather tool cannot run because OPENWEATHER_API_KEY is missing")
-        return {
-            "error": "OPENWEATHER_API_KEY is missing. Add your OpenWeatherMap API key to .env."
-        }
-
-    # Query parameters are values added to the URL by `requests`.
-    # For example, requests will turn these into something like:
-    # ?q=Austin&appid=...&units=imperial
-    #
-    # `q` is OpenWeatherMap's parameter for the city/location.
-    # `appid` is the API key.
-    # `units="imperial"` asks for Fahrenheit and miles-per-hour style units.
-    params = {
-        "q": location.strip(),
-        "appid": OPENWEATHER_API_KEY,
-        "units": "imperial",
-    }
-    debug_print("Weather tool prepared OpenWeatherMap request", {
-        "url": OPENWEATHER_URL,
-        "params": {
-            "q": params["q"],
-            "appid": "[hidden]",
-            "units": params["units"],
-        },
-    })
-
-    try:
-        # Send an HTTP GET request to OpenWeatherMap.
-        #
-        # GET is the common HTTP method for "please retrieve data".
-        # `params=params` adds the query parameters safely.
-        # `timeout=10` means "give up after 10 seconds" so the app does not hang
-        # forever if the network or API is unavailable.
-        response = requests.get(OPENWEATHER_URL, params=params, timeout=10)
-        debug_print("OpenWeatherMap HTTP response received", {
-            "status_code": response.status_code,
-            "url_without_api_key": response.url.replace(OPENWEATHER_API_KEY, "[hidden]"),
-        })
-
-        # OpenWeatherMap returns JSON text. `response.json()` parses that text
-        # into Python data structures, usually dictionaries and lists.
-        data = response.json()
-        debug_print("Parsed OpenWeatherMap JSON response", data)
-    except requests.RequestException as exc:
-        # Network errors, timeouts, DNS problems, and similar request failures
-        # are grouped under `requests.RequestException`.
-        return {"error": f"Could not reach OpenWeatherMap: {exc}"}
-    except ValueError:
-        # If the API response is not valid JSON, `response.json()` raises
-        # ValueError. The agent cannot use a response it cannot parse.
-        return {"error": "OpenWeatherMap returned a response that was not valid JSON."}
-
-    # HTTP status code 200 means success.
-    # Other status codes can mean invalid API key, city not found, rate limit,
-    # server error, and so on.
-    if response.status_code != 200:
-        # `.get("message", "...")` reads the API's error message if it exists;
-        # otherwise it uses the fallback string.
-        message = data.get("message", "Unknown weather API error.")
-        debug_print("OpenWeatherMap returned an error response", {
-            "status_code": response.status_code,
-            "message": message,
-        })
-        return {"error": f"OpenWeatherMap error: {message}"}
+    data = onecall_result["data"]
 
     try:
         # Pull only the fields we want the LLM to use.
         #
-        # OpenWeatherMap returns a large nested JSON object. In Python:
-        # - `data["main"]["temp"]` means get the `main` dictionary, then get
-        #   its `temp` value.
-        # - `data["weather"][0]["description"]` means get the first item from
-        #   the `weather` list, then get its `description`.
+        # OpenWeatherMap One Call returns a large nested JSON object. In Python:
+        # - `data["current"]["temp"]` means get the `current` dictionary, then
+        #   get its `temp` value.
+        # - `data["current"]["weather"][0]["description"]` means get the first
+        #   item from the `weather` list, then get its `description`.
         #
         # Returning a smaller dictionary keeps the final LLM prompt focused.
+        current = data["current"]
         weather_result = {
-            "location": f"{data['name']}, {data['sys']['country']}",
-            "temperature_f": data["main"]["temp"],
-            "feels_like_f": data["main"]["feels_like"],
-            "condition": data["weather"][0]["description"],
-            "humidity": data["main"]["humidity"],
-            "wind_speed_mph": data["wind"]["speed"],
+            "location": onecall_result["location"],
+            "temperature_f": current["temp"],
+            "feels_like_f": current["feels_like"],
+            "condition": current["weather"][0]["description"],
+            "humidity": current["humidity"],
+            "wind_speed_mph": current["wind_speed"],
         }
         debug_print("Weather tool normalized API data for the LLM", weather_result)
         return weather_result
@@ -133,3 +234,68 @@ def get_current_weather(location: str) -> dict:
         # - IndexError: a list did not have the expected first item.
         # - TypeError: a value had the wrong type, such as None instead of dict.
         return {"error": "OpenWeatherMap returned an unexpected data format."}
+
+
+def get_weather_forecast(location: str, days: int = 7) -> dict:
+    """Fetch a daily weather forecast from OpenWeatherMap One Call for up to 8 days.
+
+    Parameters:
+    - location: a city or place name, such as "Austin" or "New York".
+    - days: how many forecast days to request. One Call supports values from
+      1 through 8 for daily forecasts.
+
+    Return value:
+    - A Python dictionary containing the location, number of days requested, and
+      a list of daily forecast dictionaries. If something goes wrong, the
+      dictionary contains an `"error"` key instead.
+
+    How this fits the architecture:
+    This is a second tool the LLM can choose. The current-weather tool answers
+    "what is happening now?" and this forecast tool answers "what will happen
+    over the next few days?"
+    """
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        return {"error": "Forecast days must be a number from 1 to 8."}
+
+    if days < 1 or days > 8:
+        return {"error": "Forecast days must be between 1 and 8."}
+
+    onecall_result = _get_onecall_weather(
+        location,
+        exclude="current,minutely,hourly,alerts",
+    )
+    if "error" in onecall_result:
+        return onecall_result
+
+    data = onecall_result["data"]
+
+    try:
+        forecasts = []
+        timezone_offset = data.get("timezone_offset", 0)
+
+        for daily_forecast in data["daily"][:days]:
+            forecasts.append(
+                {
+                    "date": _format_date(daily_forecast["dt"], timezone_offset),
+                    "temperature_day_f": daily_forecast["temp"]["day"],
+                    "temperature_min_f": daily_forecast["temp"]["min"],
+                    "temperature_max_f": daily_forecast["temp"]["max"],
+                    "feels_like_day_f": daily_forecast["feels_like"]["day"],
+                    "condition": daily_forecast["weather"][0]["description"],
+                    "humidity": daily_forecast["humidity"],
+                    "wind_speed_mph": daily_forecast["speed"],
+                }
+            )
+
+        forecast_result = {
+            "location": onecall_result["location"],
+            "days_requested": days,
+            "days_returned": len(forecasts),
+            "forecast": forecasts,
+        }
+        debug_print("Forecast tool normalized API data for the LLM", forecast_result)
+        return forecast_result
+    except (KeyError, IndexError, TypeError):
+        return {"error": "OpenWeatherMap returned an unexpected forecast data format."}

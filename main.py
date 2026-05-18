@@ -12,9 +12,11 @@ def print_startup_help() -> None:
     """
     print("Weather Agent")
     print("-------------")
-    print("Ask for current weather, for example:")
+    print("Ask for current weather or a forecast, for example:")
     print('  "What is the weather in Austin?"')
     print('  "Give me the weather for New York"')
+    print('  "Give me a 5 day forecast for Chicago"')
+    print('  "What will the weather be like in Denver this weekend?"')
     print()
     print("Setup:")
     print("  1. Install dependencies: pip install -r requirements.txt")

@@ -14,14 +14,14 @@ from agent.prompts import SYSTEM_PROMPT
 # This is the local Python function that actually calls the weather API.
 # The LLM does not run this function directly. Instead, the LLM asks for a tool
 # call, and our Python code decides whether and how to execute this function.
-from agent.tools import get_current_weather
+from agent.tools import get_current_weather, get_weather_forecast
 
 # Configuration values come from environment variables loaded in `main.py`.
 from config import OPENAI_API_KEY, OPENAI_MODEL, debug_print
 
 
 class WeatherAgent:
-    """A small OpenAI-powered agent that can call a weather tool.
+    """A small OpenAI-powered agent that can call weather tools.
 
     In this project, an "agent" means a language model plus a little control
     loop around it. The language model reads the user's message and decides
@@ -50,14 +50,14 @@ class WeatherAgent:
         self.model = OPENAI_MODEL
 
         # `self.tools` is a list of tool definitions that will be sent to the
-        # LLM. This does not execute the function. It only describes the
-        # function so the model can decide whether it should be called.
+        # LLM. This does not execute the functions. It only describes the
+        # functions so the model can decide whether one should be called.
         self.tools = [
             {
                 # OpenAI's chat API supports different tool types. Here the
                 # tool type is "function", meaning the model can request a
                 # function call with structured arguments.
-                "type": "function", # ALWAYS FUNCTION
+                "type": "function",  # ALWAYS FUNCTION
                 "function": {
                     # This name must match the local function handling logic in
                     # `_handle_tool_call()`. The LLM will use this exact name if
@@ -72,8 +72,8 @@ class WeatherAgent:
                     # arguments the function expects. In this case, the tool
                     # needs one string called `location`.
                     "parameters": {
-                        "type": "object", #says that it must be a JSON object, not a string or list
-                        "properties": { #Defines allowed fields
+                        "type": "object",  # says that it must be a JSON object, not a string or list
+                        "properties": {  # Defines allowed fields
                             "location": {
                                 "type": "string",
                                 "description": "The city or location, such as Austin or New York.",
@@ -88,7 +88,34 @@ class WeatherAgent:
                         "additionalProperties": False,
                     },
                 },
-            }
+            },
+            {
+                # This second tool is also a function tool. It is for forecast
+                # questions like "What will the weather be like this weekend?"
+                # or "Give me a 5 day forecast for Chicago."
+                "type": "function",
+                "function": {
+                    "name": "get_weather_forecast",
+                    "description": "Get a daily weather forecast for a city or location for 1 to 8 days.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {
+                                "type": "string",
+                                "description": "The city or location, such as Austin or New York.",
+                            },
+                            "days": {
+                                "type": "integer",
+                                "description": "The number of forecast days to return, from 1 to 8.",
+                                "minimum": 1,
+                                "maximum": 8,
+                            },
+                        },
+                        "required": ["location", "days"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
         ]
 
         debug_print("WeatherAgent initialized", {
@@ -194,8 +221,8 @@ class WeatherAgent:
         debug_print("Appended assistant tool-call message to preserve causal chain", self._messages_to_debug_list(messages))
 
         # A model can technically request multiple tools at once. This project
-        # only defines one tool, but looping keeps the code compatible with the
-        # API shape.
+        # defines two tools, and looping keeps the code compatible with the API
+        # shape if more tools are added later.
         for tool_call in assistant_message.tool_calls:
             # Run the local Python function requested by the LLM and get back a
             # Python dictionary, such as:
@@ -224,8 +251,8 @@ class WeatherAgent:
         # Now ask the model a second time. This time the conversation includes:
         # 1. The system prompt.
         # 2. The user's weather question.
-        # 3. The assistant's request to call `get_current_weather`.
-        # 4. The tool result containing live weather data.
+        # 3. The assistant's request to call a weather tool.
+        # 4. The tool result containing live weather or forecast data.
         # AKA The entire Causal Chain is there so no inferring/poor reasoning will occur
         # 
         # The model uses that data to produce a natural-language response.
@@ -262,9 +289,9 @@ class WeatherAgent:
         function_name = tool_call.function.name
         debug_print("Tool handler received function name", function_name)
 
-        # Only allow the one tool this app explicitly supports. This prevents
-        # the model from accidentally or maliciously requesting unknown code.
-        if function_name != "get_current_weather":
+        # Only allow the tools this app explicitly supports. This prevents the
+        # model from accidentally or maliciously requesting unknown code.
+        if function_name not in {"get_current_weather", "get_weather_forecast"}:
             return {"error": f"Unknown tool requested: {function_name}"}
 
         try:
@@ -289,9 +316,13 @@ class WeatherAgent:
         location = arguments.get("location")
 
         # This is where the agent's tool call becomes a real API lookup.
-        # `get_current_weather()` lives in `agent/tools.py` and calls
+        # The weather functions live in `agent/tools.py` and call
         # OpenWeatherMap over the internet.
-        return get_current_weather(location)
+        if function_name == "get_current_weather":
+            return get_current_weather(location)
+
+        days = arguments.get("days", 7)
+        return get_weather_forecast(location, days)
 
     def _messages_to_debug_list(self, messages: list[Any]) -> list[dict]:
         """Convert mixed message objects/dicts into printable debug dictionaries.
