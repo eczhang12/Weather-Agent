@@ -107,8 +107,8 @@ friendly final answer.
 ```mermaid
 flowchart TD
     A[User enters a weather question] --> B[main.py receives the input]
-    B --> C[WeatherAgent builds conversation messages]
-    C --> D[Messages are sent to the OpenAI model]
+    B --> C[WeatherAgent appends the user message to conversation memory]
+    C --> D[Full message history is sent to the OpenAI model]
     D --> E{Can the model answer directly?}
     E -->|Yes| F[Model returns a normal assistant message]
     F --> G[Final answer is shown to the user]
@@ -121,7 +121,8 @@ flowchart TD
     M --> N[Tool result is appended to conversation history]
     N --> O[Updated messages are sent back to the model]
     O --> P[Model creates a friendly weather summary]
-    P --> G
+    P --> Q[Final assistant answer is appended to memory]
+    Q --> G
 ```
 
 Here is the same flow written out:
@@ -129,10 +130,9 @@ Here is the same flow written out:
 1. You type something like `What is the weather in Austin?`.
 2. `main.py` reads your text from the terminal.
 3. `main.py` passes your text to `WeatherAgent.run()`.
-4. The agent creates a message list containing the system prompt and your user
-   message.
-5. The agent sends those messages to the OpenAI model, along with descriptions
-   of the `get_current_weather` and `get_weather_forecast` tools.
+4. The agent appends your user message to its `messages` list.
+5. The agent sends the full `messages` list to the OpenAI model, along with
+   descriptions of the `get_current_weather` and `get_weather_forecast` tools.
 6. The model decides whether it can answer directly or whether it needs live
    weather data.
 7. For current or forecast weather questions, the model returns a tool call
@@ -147,7 +147,40 @@ Here is the same flow written out:
 13. The app appends that tool result to the conversation history.
 14. The updated messages are sent back to the OpenAI model.
 15. The model reads the weather data and writes a friendly summary.
-16. `main.py` prints the final answer in the terminal.
+16. The agent appends the final assistant answer to memory.
+17. `main.py` prints the final answer in the terminal.
+
+### Conversation Memory
+
+The agent keeps simple conversation memory in a Python list called `messages`.
+This memory only lasts for the current terminal session. When you stop the
+program, the memory is gone.
+
+The `messages` list stores:
+
+1. The system prompt at the beginning.
+2. Every user message.
+3. Every assistant response.
+4. Every assistant tool-call message.
+5. Every tool result message.
+
+This is necessary because the OpenAI model is stateless between API calls. The
+model does not automatically remember what happened earlier. The `messages` list
+is the memory, and the app must pass it into every OpenAI API call.
+
+That is what enables follow-up questions. For example:
+
+```text
+User: What is the weather in Chicago?
+Assistant: gives Chicago weather
+User: What about tomorrow?
+Assistant: understands that "tomorrow" refers to Chicago
+```
+
+Tool-call messages and tool results both need to be saved. The assistant
+tool-call message shows why a tool was called, and the tool result shows what
+the local Python function returned. Keeping both messages in order preserves the
+causal chain that the model needs for the final answer and future follow-ups.
 
 ### Why Append the Assistant Tool-Call Message?
 

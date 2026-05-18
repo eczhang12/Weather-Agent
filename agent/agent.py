@@ -49,6 +49,20 @@ class WeatherAgent:
         # not need to know where the setting came from.
         self.model = OPENAI_MODEL
 
+        # `self.messages` is this agent's short-term conversation memory.
+        #
+        # Important idea:
+        # The OpenAI model is stateless between API calls. It does not remember
+        # the previous request unless we send the previous messages again.
+        #
+        # Because this list lives on the `WeatherAgent` object, it lasts for the
+        # current terminal session/program run. It is not saved to a database or
+        # file, so memory resets when the program exits.
+        #
+        # The system prompt stays at the beginning so every model call receives
+        # the same high-level instructions.
+        self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
         # `self.tools` is a list of tool definitions that will be sent to the
         # LLM. This does not execute the functions. It only describes the
         # functions so the model can decide whether one should be called.
@@ -138,21 +152,24 @@ class WeatherAgent:
         - A plain string that can be printed in the terminal.
 
         How this fits the architecture:
-        This method is the main agent loop for one user request. It sends the
-        request to the LLM, checks whether the LLM asked to use a tool, runs any
-        requested tool locally, then asks the LLM to write the final answer.
+        This method is the main agent loop for one user request. It appends the
+        user's message to the session memory, sends that memory to the LLM,
+        checks whether the LLM asked to use a tool, runs any requested tool
+        locally, then asks the LLM to write the final answer.
         """
-        # `messages` is the conversation history sent to the chat model.
+        # `self.messages` is the conversation history sent to the chat model.
         # Each message has a `role`:
         # - "system" gives instructions to the assistant.
         # - "user" contains the human's request.
+        # - "assistant" contains previous model responses or tool-call requests.
+        # - "tool" contains the result returned by local Python tool functions.
         #
-        # This is the first request in the request/response flow.
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_input},
-        ]
-        debug_print("WeatherAgent built initial messages", messages)
+        # Appending the user message before the API call is what lets follow-up
+        # questions work. For example, after "What is the weather in Chicago?",
+        # a later "What about tomorrow?" can be understood because the earlier
+        # Chicago turn is still in `self.messages`.
+        self.messages.append({"role": "user", "content": user_input})
+        debug_print("Appended user message to conversation memory", self._messages_to_debug_list(self.messages))
 
         # Ask the model what to do with the user's message.
         #
@@ -164,7 +181,7 @@ class WeatherAgent:
         #   answer directly.
         first_response = self.client.chat.completions.create(
             model=self.model,
-            messages=messages,
+            messages=self.messages,
             tools=self.tools,
             tool_choice="auto",
         )
@@ -182,6 +199,8 @@ class WeatherAgent:
         # without live weather data.
         if not assistant_message.tool_calls: # checking if LLM Determined if tool should be used or not
             debug_print("No tool call requested; returning assistant response directly")
+            self.messages.append(assistant_message)
+            debug_print("Appended assistant response to conversation memory", self._messages_to_debug_list(self.messages))
             return assistant_message.content or "I am not sure how to answer that."
 
         # If the model did request a tool, save the assistant's tool-call
@@ -217,8 +236,8 @@ class WeatherAgent:
         # - mismatching tool outputs to requests
         # - failures when multiple tools are involved
         # - invalid tool-calling conversation structure
-        messages.append(assistant_message)
-        debug_print("Appended assistant tool-call message to preserve causal chain", self._messages_to_debug_list(messages))
+        self.messages.append(assistant_message)
+        debug_print("Appended assistant tool-call message to preserve causal chain", self._messages_to_debug_list(self.messages))
 
         # A model can technically request multiple tools at once. This project
         # defines two tools, and looping keeps the code compatible with the API
@@ -239,14 +258,14 @@ class WeatherAgent:
             # `json.dumps(tool_result)` converts the Python dictionary into a
             # JSON string because chat messages contain text, not raw Python
             # dictionaries.
-            messages.append(
+            self.messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": tool_call.id,
                     "content": json.dumps(tool_result),
                 }
             )
-            debug_print("Appended tool result to conversation history", self._messages_to_debug_list(messages))
+            debug_print("Appended tool result to conversation memory", self._messages_to_debug_list(self.messages))
 
         # Now ask the model a second time. This time the conversation includes:
         # 1. The system prompt.
@@ -256,13 +275,18 @@ class WeatherAgent:
         # AKA The entire Causal Chain is there so no inferring/poor reasoning will occur
         # 
         # The model uses that data to produce a natural-language response.
-        debug_print("Sending updated messages back to OpenAI for final answer", self._messages_to_debug_list(messages))
+        debug_print("Sending updated conversation memory back to OpenAI for final answer", self._messages_to_debug_list(self.messages))
         final_response = self.client.chat.completions.create(
             model=self.model,
-            messages=messages,
+            messages=self.messages,
         )
         final_message = final_response.choices[0].message
         debug_print("OpenAI final response received", self._message_to_debug_dict(final_message))
+
+        # Save the final assistant answer too. This is what lets future turns
+        # refer back to what the assistant already told the user.
+        self.messages.append(final_message)
+        debug_print("Appended final assistant answer to conversation memory", self._messages_to_debug_list(self.messages))
 
         # Return the assistant's final text. The fallback string protects the
         # CLI from printing `None` if the API response has no content.
