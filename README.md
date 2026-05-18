@@ -20,6 +20,10 @@ OPENAI_MODEL=gpt-4.1-mini
 WEATHER_AGENT_DEBUG=false
 ```
 
+## One Call
+This Weather Agent uses OpenWeather's One Call subscription.
+The One Call subscription is free for the first 1000 calls daily, but does require a credit card on file. 
+
 ## Docker (Preferred)
 
 Build the image:
